@@ -1,14 +1,17 @@
 import pyaudio
 import numpy as np
-import csv
 import librosa
 from matplotlib import pyplot
 from matplotlib import animation
 import matplotlib
 from matplotlib.widgets import Button
+import openai
+
+# ========== 配置您的OpenAI API Key ==========
+OPENAI_API_KEY = "MY API KEY"
+openai.api_key = OPENAI_API_KEY
 
 matplotlib.use('TkAgg')
-
 WIDTH = 2
 CHANNELS = 1
 RATE = 8000
@@ -16,12 +19,9 @@ BLOCKLEN = 512
 DURATION = 10  # seconds
 FRAME_RATE = int(RATE / BLOCKLEN)
 NUM_FRAMES = DURATION * FRAME_RATE
-
-# 全局状态变量
 capturing = False
 frame_count = 0
 
-# 初始化特征存储
 features = {
     'time': [],
     'pitch': [],
@@ -30,7 +30,7 @@ features = {
     'bpm': None
 }
 
-# 打开音频流
+all_audio_blocks = []
 p = pyaudio.PyAudio()
 PA_FORMAT = p.get_format_from_width(WIDTH)
 stream = p.open(
@@ -42,7 +42,6 @@ stream = p.open(
     frames_per_buffer=BLOCKLEN
 )
 
-# 设置绘图
 my_fig, (ax1, ax2) = pyplot.subplots(2, 1)
 my_fig.canvas.manager.set_window_title("Intelligent Music Recommendation System based on LLM")
 my_fig.set_facecolor('Gainsboro')
@@ -63,15 +62,13 @@ ax2.set_ylim(0, 3000)
 ax2.set_xlabel('Frequency (Hz)')
 ax2.set_title('Frequency Spectrum')
 my_fig.tight_layout()
-
 my_fig.subplots_adjust(top=0.8)
 
 n_fft = BLOCKLEN
-
-# 在顶部添加按钮
-button_ax = pyplot.axes([0.42, 0.92, 0.22, 0.05])  # 调整按钮位置和大小
-# start_button = Button(button_ax, 'Start Recommend')
+button_ax = pyplot.axes([0.42, 0.92, 0.22, 0.05])
 start_button = Button(button_ax, 'Start Recommend', color='lightblue', hovercolor='lightgreen')
+
+my_anima = None
 
 
 def my_init():
@@ -80,83 +77,120 @@ def my_init():
     return g1, g2
 
 
+def compute_bpm(audio_signal, sr):
+    tempo, _ = librosa.beat.beat_track(y=audio_signal.astype(float), sr=sr)
+    return tempo
+
+
+def get_song_recommendations(description):
+    prompt = (
+        f"Based on the following music description, recommend 3 songs with a similar style:\n\n"
+        f"{description}\n\n"
+        "Please provide the name of the songs, their singers, and the album name in a list format."
+    )
+
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a music expert."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=200,
+        temperature=0.7
+    )
+
+    return response.choices[0].message.content.strip()
+
+
 def my_update(frame_idx):
-    global capturing, frame_count, features
+    global capturing, frame_count, features, all_audio_blocks, my_anima
 
     if not capturing:
-        # 不在捕获状态时不更新数据，只返回空值
         return g1, g2
 
     if frame_count >= NUM_FRAMES:
-        # 已经录满10秒数据，结束捕获
+        # 停止录制
         capturing = False
-
-        # 计算BPM
-        recorded_signal = np.array(features['mfccs']).flatten()
+        recorded_signal = np.concatenate(all_audio_blocks)
         features['bpm'] = compute_bpm(recorded_signal, RATE)
 
-        # 写入CSV
-        save_features_to_csv(features, 'audio_features.csv')
+        pitch_array = np.array(features['pitch'])
+        centroid_array = np.array(features['spectral_centroid'])
+        mfccs_array = np.array(features['mfccs'])  # shape: [num_frames, 13]
 
-        # 停止动画事件源
-        my_anima.event_source.stop()
+        pitch_var = np.mean(pitch_array)
+        centroid_var = np.mean(centroid_array)
+        mfccs_var = np.mean(mfccs_array, axis=0)
+        bpm_var = features['bpm'][0]
+
+        print("Pitch Average:", pitch_var)
+        print("Spectral Centroid Average:", centroid_var)
+        print("MFCCs Average:", mfccs_var)
+        print("BPM:", bpm_var)
+
+        # 根据bpm描述节奏
+        # if bpm_var < 60:
+        #     tempo_desc = "a slow and soothing tempo"
+        # elif 60 <= bpm_var <= 90:
+        #     tempo_desc = "a moderate tempo"
+        # elif 90 < bpm_var <= 150:
+        #     tempo_desc = "a lively and energetic tempo"
+        # else:
+        #     tempo_desc = "a very fast tempo"
+        tempo_desc = "average BPM is " + str(bpm_var)
+
+        # 根据频谱质心描述音色明亮度
+        # if centroid_var < 2000:
+        #     tone_desc = "a warm and smooth sound"
+        # else:
+        #     tone_desc = "a bright and crisp sound"
+        tone_desc = "average spectral centroid is " + str(centroid_var)
+
+        # 根据基频描述音高
+        # if pitch_var < 300:
+        #     pitch_desc = "with a low-pitched melody"
+        # else:
+        #     pitch_desc = "with a high-pitched melody"
+        pitch_desc = "average pitch is " + str(pitch_var)
+
+        description = (f"The audio features of input music are: {tempo_desc}, {tone_desc}, {pitch_desc}.")
+        print("Generated real-time input music description:")
+        print(description)
+
+        # 调用大语言模型API获取推荐歌曲
+        recommendations = get_song_recommendations(description)
+        print("Recommended Songs:")
+        print(recommendations)
+
+        if my_anima is not None:
+            my_anima.event_source.stop()
         return g1, g2
 
-    # 读取音频数据
     signal_bytes = stream.read(BLOCKLEN, exception_on_overflow=False)
     signal_block = np.frombuffer(signal_bytes, dtype='int16')
     signal_block = np.pad(signal_block, (0, max(0, BLOCKLEN - len(signal_block))), mode='constant')
+    all_audio_blocks.append(signal_block)
     X_input = np.fft.rfft(signal_block) / BLOCKLEN
 
     # 提取特征
-    pitch = librosa.piptrack(
-        y=signal_block.astype(float), sr=RATE, n_fft=n_fft
-    )[0].mean()
-    spectral_centroid = librosa.feature.spectral_centroid(
-        y=signal_block.astype(float), sr=RATE, n_fft=n_fft
-    )[0].mean()
-    mfccs = librosa.feature.mfcc(
-        y=signal_block.astype(float), sr=RATE, n_mfcc=13, n_fft=n_fft
-    ).mean(axis=1)
+    pitch = librosa.piptrack(y=signal_block.astype(float), sr=RATE, n_fft=n_fft)[0].mean()
+    spectral_centroid = librosa.feature.spectral_centroid(y=signal_block.astype(float), sr=RATE, n_fft=n_fft)[0].mean()
+    mfccs = librosa.feature.mfcc(y=signal_block.astype(float), sr=RATE, n_mfcc=13, n_fft=n_fft).mean(axis=1)
 
-    # 更新特征存储
     features['time'].append(frame_count / FRAME_RATE)
     features['pitch'].append(pitch)
     features['spectral_centroid'].append(spectral_centroid)
     features['mfccs'].append(mfccs.tolist())
 
-    # 更新绘图
     g1.set_ydata(signal_block)
     g2.set_ydata(np.abs(X_input))
-
     frame_count += 1
     return g1, g2
 
 
-def compute_bpm(audio_signal, sr):
-    tempo, _ = librosa.beat.beat_track(y=audio_signal, sr=sr)
-    return tempo
-
-
-def save_features_to_csv(features, filename):
-    with open(filename, 'w', newline='') as f:
-        writer = csv.writer(f)
-        header = ['Time', 'Pitch', 'Spectral Centroid'] + [f'MFCC_{i+1}' for i in range(13)] + ['BPM']
-        writer.writerow(header)
-        for i in range(len(features['time'])):
-            row = [
-                features['time'][i],
-                features['pitch'][i],
-                features['spectral_centroid'][i]
-            ] + features['mfccs'][i] + [features['bpm']]
-            writer.writerow(row)
-    print("* Finished and saved audio features to 'audio_features.csv'")
-
-
 def start_capture(event):
-    global capturing, frame_count, features, my_anima
+    global capturing, frame_count, features, my_anima, all_audio_blocks
 
-    # 清空特征数据
     features = {
         'time': [],
         'pitch': [],
@@ -165,10 +199,10 @@ def start_capture(event):
         'bpm': None
     }
 
+    all_audio_blocks = []
     frame_count = 0
     capturing = True
 
-    # 每次点击按钮都重新启动动画
     my_anima = animation.FuncAnimation(
         my_fig,
         my_update,
@@ -178,16 +212,11 @@ def start_capture(event):
         cache_frame_data=False,
         repeat=False
     )
-
-    # 动画开始运行
     my_anima.event_source.start()
 
 
 start_button.on_clicked(start_capture)
-
 pyplot.show()
-
-# 程序不再在这里关闭音频流, 保持打开状态
 stream.stop_stream()
 stream.close()
 p.terminate()
