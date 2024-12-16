@@ -7,7 +7,6 @@ import matplotlib
 from matplotlib.widgets import Button
 import openai
 
-# ========== 配置您的OpenAI API Key ==========
 OPENAI_API_KEY = "MY API KEY"
 openai.api_key = OPENAI_API_KEY
 
